@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::{PathBuf, Path}};
 
 use anyhow::{Context, Result};
 use git_subcopy::App;
@@ -37,6 +37,8 @@ enum Opt {
         #[structopt(flatten)]
         opts: FetchOpts,
     },
+    /// List all subcopies according to the `.gitcopies` file.
+    List,
 }
 
 fn main() -> Result<()> {
@@ -59,7 +61,18 @@ fn main() -> Result<()> {
             if let Opt::Add { .. } = &opt {
                 app.register(&opts.url, &opts.rev, &opts.from, &opts.to).context("failed to register to .gitcopies")?;
             }
-        }
+        },
+        Opt::List => {
+            let configs = app.list()?;
+
+            for conf in configs.values() {
+                let url = conf.url.as_ref().map(|p| &**p).unwrap_or("<unknown>");
+                let rev = conf.rev.as_ref().map(|p| &**p).unwrap_or("<unknown>");
+                let src = conf.src.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
+                let dest = conf.dest.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
+                println!("{} = Cloned from {}:{}, revision {}", dest.display(), url, src.display(), rev);
+            }
+        },
     }
     Ok(())
 }

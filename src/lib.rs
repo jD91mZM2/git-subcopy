@@ -1,4 +1,4 @@
-use std::{fs, path::{PathBuf, Path}};
+use std::{collections::HashMap, fs, path::{PathBuf, Path}};
 
 use anyhow::{anyhow, Context, Result};
 use git2::{
@@ -8,6 +8,18 @@ use git2::{
     TreeWalkMode,
     TreeWalkResult,
 };
+
+fn path_to_string(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| anyhow!("path must be valid utf-8"))
+}
+
+#[derive(Debug, Default)]
+pub struct SubcopyConfig {
+    pub url: Option<String>,
+    pub rev: Option<String>,
+    pub src: Option<PathBuf>,
+    pub dest: Option<PathBuf>,
+}
 
 pub struct App {
     cache_dir: PathBuf,
@@ -80,11 +92,6 @@ impl App {
     }
 
     pub fn register(&self, url: &str, rev: &str, src: &Path, dest: &Path) -> Result<()> {
-        fn path_to_string(path: &Path) -> Result<&str> {
-            path.to_str()
-                .ok_or_else(|| anyhow!("path must be valid utf-8"))
-        }
-
         let repo = Repository::open_from_env()?;
         let workdir = repo.workdir().ok_or_else(|| anyhow!("repository is bare and has no workdir"))?
             .canonicalize().context("failed to find full path to repository workdir")?;
@@ -99,5 +106,33 @@ impl App {
         config.set_str(&format!("subcopy.{}.src", relative_str), path_to_string(src)?)?;
         config.set_str(&format!("subcopy.{}.dest", relative_str), path_to_string(relative)?)?;
         Ok(())
+    }
+
+    pub fn list(&self) -> Result<HashMap<String, SubcopyConfig>> {
+        let repo = Repository::open_from_env()?;
+        let workdir = repo.workdir().ok_or_else(|| anyhow!("repository is bare and has no workdir"))?;
+        let config = Config::open(&workdir.join(".gitcopies")).context("failed to open .gitcopies")?;
+
+        let mut map: HashMap<String, SubcopyConfig> = HashMap::new();
+
+        for entry in &config.entries(Some(r"^subcopy\..*\.(url|rev|src|dest)$"))? {
+            let entry = entry?;
+            let name = entry.name().ok_or_else(|| anyhow!("entry name was not valid utf-8"))?;
+
+            let part = name.rsplitn(2, '.').nth(1).ok_or_else(|| anyhow!("incomplete subcopy property name"))?;
+            let slot = map.entry(part.to_owned()).or_default();
+
+            if name.ends_with("url") {
+                slot.url = entry.value().map(String::from);
+            } else if name.ends_with("rev") {
+                slot.rev = entry.value().map(String::from);
+            } else if name.ends_with("src") {
+                slot.src = entry.value().map(PathBuf::from);
+            } else if name.ends_with("dest") {
+                slot.dest = entry.value().map(PathBuf::from);
+            }
+        }
+
+        Ok(map)
     }
 }
