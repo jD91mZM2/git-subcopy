@@ -1,4 +1,10 @@
-use std::{fs, path::{PathBuf, Path}};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::{PathBuf, Path},
+    process::Command,
+};
 
 use anyhow::{Context, Result};
 use git_subcopy::App;
@@ -39,9 +45,17 @@ enum Opt {
     },
     /// List all subcopies according to the `.gitcopies` file.
     List,
+    /// Get a shell in a temporary repository with a worktree clearly showing how your copy diverges from the upstream.
+    Shell {
+        /// The path to the copied content, as specified in
+        /// `.gitcopies`.
+        from: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let opt = Opt::from_args();
     let app = App::new()?;
 
@@ -68,10 +82,22 @@ fn main() -> Result<()> {
             for conf in configs.values() {
                 let url = conf.url.as_ref().map(|p| &**p).unwrap_or("<unknown>");
                 let rev = conf.rev.as_ref().map(|p| &**p).unwrap_or("<unknown>");
-                let src = conf.src.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
-                let dest = conf.dest.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
-                println!("{} = Cloned from {}:{}, revision {}", dest.display(), url, src.display(), rev);
+                let source_path = conf.source_path.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
+                let dest_path = &conf.dest_path;
+                println!("{} = Cloned from {}:{}, revision {}", dest_path.display(), url, source_path.display(), rev);
             }
+        },
+        Opt::Shell { from } => {
+            let conf = app.get(from)?;
+
+            let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+
+            app.with_repo(&conf.url, &conf.rev, &conf.source_path, from, |repo| {
+                Command::new(shell)
+                    .current_dir(repo.workdir().expect("created repo shouldn't be a bare repo"))
+                    .status()?;
+                Ok(())
+            })?;
         },
     }
     Ok(())
