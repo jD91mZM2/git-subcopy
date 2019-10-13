@@ -119,11 +119,11 @@ fn main() -> Result<()> {
             let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
 
             let rev = app.with_repo(&conf.url, &conf.rev, &conf.upstream_path, local_path, |repo| {
-                let onto_rev = repo.revparse_single(&rev).context("failed to parse specified upstream revision")?;
-                let onto_commit = repo.find_annotated_commit(onto_rev.id()).context("failed to find commit for revision")?;
-
                 repo.find_remote("upstream").expect("remote 'upstream' should be set at this point")
                     .fetch(&[], None, None)?;
+
+                let onto_rev = repo.revparse_single(&rev).context("failed to parse specified upstream revision")?;
+                let onto_commit = repo.find_annotated_commit(onto_rev.id()).context("failed to find commit for revision")?;
 
                 let head = repo.head().context("failed to find head")?
                     .peel_to_commit().context("head wasn't a commit")?;
