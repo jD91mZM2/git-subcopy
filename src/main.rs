@@ -2,11 +2,13 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    iter,
     path::{PathBuf, Path},
     process::Command,
 };
 
 use anyhow::{Context, Result};
+use git2::{IndexAddOption, RebaseOptions, Signature};
 use git_subcopy::App;
 use structopt::StructOpt;
 
@@ -17,9 +19,9 @@ struct FetchOpts {
     /// The commit reference to extract files from
     rev: String,
     /// The source destination to extract files from
-    from: PathBuf,
+    upstream_path: PathBuf,
     /// The target destination to extract files from
-    to: PathBuf,
+    local_path: PathBuf,
 
     /// Whether or not to overwrite any existing directories. Will
     /// also create parent directories if they don't exist.
@@ -45,12 +47,22 @@ enum Opt {
     },
     /// List all subcopies according to the `.gitcopies` file.
     List,
-    /// Get a shell in a temporary repository with a worktree clearly showing how your copy diverges from the upstream.
+    /// Get a shell in a temporary repository with a worktree clearly
+    /// showing how your copy diverges from the upstream.
     Shell {
         /// The path to the copied content, as specified in
         /// `.gitcopies`.
-        from: PathBuf,
+        local_path: PathBuf,
     },
+    /// Update changes on your local copy to be based on a newer
+    /// upstream.
+    Rebase {
+        /// The path to the copied content, as specified in
+        /// `.gitcopies`.
+        local_path: PathBuf,
+        /// The new revision to be based upon.
+        rev: String,
+    }
 }
 
 fn main() -> Result<()> {
@@ -65,15 +77,16 @@ fn main() -> Result<()> {
             let repo = app.fetch(&opts.url).context("failed to fetch git repo")?;
 
             if opts.force {
-                fs::create_dir_all(&opts.to).context("failed to create destination directory")?;
+                fs::create_dir_all(&opts.local_path).context("failed to create destination directory")?;
             } else {
-                fs::create_dir(&opts.to).context("failed to create *unique* destination directory")?;
+                fs::create_dir(&opts.local_path).context("failed to create *unique* destination directory")?;
             }
 
-            app.extract(&repo, &opts.rev, &opts.from, &opts.to).context("failed to extract files")?;
+            let rev = repo.revparse_single(&opts.rev).context("failed to parse revision")?.id();
+            app.extract(&repo, rev, &opts.upstream_path, &opts.local_path).context("failed to extract files")?;
 
             if let Opt::Add { .. } = &opt {
-                app.register(&opts.url, &opts.rev, &opts.from, &opts.to).context("failed to register to .gitcopies")?;
+                app.register(&opts.url, rev, &opts.upstream_path, &opts.local_path).context("failed to register to .gitcopies")?;
             }
         },
         Opt::List => {
@@ -82,23 +95,67 @@ fn main() -> Result<()> {
             for conf in configs.values() {
                 let url = conf.url.as_ref().map(|p| &**p).unwrap_or("<unknown>");
                 let rev = conf.rev.as_ref().map(|p| &**p).unwrap_or("<unknown>");
-                let source_path = conf.source_path.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
-                let dest_path = &conf.dest_path;
-                println!("{} = Cloned from {}:{}, revision {}", dest_path.display(), url, source_path.display(), rev);
+                let upstream_path = conf.upstream_path.as_ref().map(|p| &**p).unwrap_or_else(|| Path::new("<unknown>"));
+                let local_path = &conf.local_path;
+                println!("{} = Cloned from {}:{}, revision {}", local_path.display(), url, upstream_path.display(), rev);
             }
         },
-        Opt::Shell { from } => {
-            let conf = app.get(from)?;
-
+        Opt::Shell { local_path } => {
+            let conf = app.get(local_path)?;
             let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
 
-            app.with_repo(&conf.url, &conf.rev, &conf.source_path, from, |repo| {
+            app.with_repo(&conf.url, &conf.rev, &conf.upstream_path, local_path, |repo| {
+                println!("You are now in a shell inside of a temporary git repository.");
+                println!("The upstream code is commited, and your changes in the worktree.");
+                println!("When you exit this shell, your changed files will be copied back.");
+                println!("=================================================================");
                 Command::new(shell)
                     .current_dir(repo.workdir().expect("created repo shouldn't be a bare repo"))
                     .status()?;
                 Ok(())
             })?;
         },
+        Opt::Rebase { local_path, rev } => {
+            let conf = app.get(local_path)?;
+            let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+
+            let rev = app.with_repo(&conf.url, &conf.rev, &conf.upstream_path, local_path, |repo| {
+                let onto_rev = repo.revparse_single(&rev).context("failed to parse specified upstream revision")?;
+                let onto_commit = repo.find_annotated_commit(onto_rev.id()).context("failed to find commit for revision")?;
+
+                let head = repo.head().context("failed to find head")?
+                    .peel_to_commit().context("head wasn't a commit")?;
+
+                let tree_id = {
+                    let mut index = repo.index().context("failed to open index")?;
+                    index.add_all(iter::once("."), IndexAddOption::DEFAULT, None).context("failed to add to index")?;
+                    index.write_tree().context("failed to write index to tree")?
+                };
+                let tree = repo.find_tree(tree_id).context("failed to find newly written tree")?;
+                let sign = Signature::now("git-subcopy", "there's nobody to blame this time").context("failed to create signature")?;
+                let id = repo.commit(Some("HEAD"), &sign, &sign, "Your changes", &tree, &[&head])
+                    .context("failed to commit changes")?;
+
+                let commit = repo.find_annotated_commit(id).context("failed to find new commit")?;
+
+                repo.rebase(Some(&commit), None, Some(&onto_commit), Some(
+                    RebaseOptions::new()
+                        .quiet(false)
+                        .inmemory(false)
+                ))?;
+
+                println!("A rebase is started. You're dropped into a shell to finish it.");
+                println!("Run `git status` to see rebase progress, and");
+                println!("`git rebase --continue` to continue the rebase.");
+                println!("==============================================================");
+                Command::new(shell)
+                    .current_dir(repo.workdir().expect("created repo shouldn't be a bare repo"))
+                    .status()?;
+                Ok(onto_rev.id())
+            })?;
+
+            app.register(&conf.url, rev, &conf.upstream_path, &local_path).context("failed to register new rev")?;
+        }
     }
     Ok(())
 }

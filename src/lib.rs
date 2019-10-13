@@ -1,12 +1,12 @@
-use std::{collections::HashMap, fs, iter, path::{PathBuf, Path}};
+use std::{collections::HashMap, fs, path::{PathBuf, Path}};
 
 use anyhow::{anyhow, Context, Result};
 use git2::{
     build::RepoBuilder,
     Config,
-    IndexAddOption,
+    Oid,
     Repository,
-    Signature,
+    ResetType,
     TreeWalkMode,
     TreeWalkResult,
 };
@@ -22,14 +22,14 @@ fn path_to_string(path: &Path) -> Result<&str> {
 pub struct SubcopyConfigOption {
     pub url: Option<String>,
     pub rev: Option<String>,
-    pub source_path: Option<PathBuf>,
-    pub dest_path: PathBuf,
+    pub upstream_path: Option<PathBuf>,
+    pub local_path: PathBuf,
 }
 #[derive(Debug, Default)]
 pub struct SubcopyConfig {
     pub url: String,
     pub rev: String,
-    pub source_path: PathBuf,
+    pub upstream_path: PathBuf,
 }
 
 pub struct App {
@@ -61,14 +61,13 @@ impl App {
         }
     }
 
-    pub fn extract(&self, repo: &'_ Repository, rev: &str, source_path: &Path, dest: &Path) -> Result<()> {
-        let tree = repo.revparse_single(rev).context("failed to parse revision")?
-            .peel_to_tree().context("revision was not tree-like")?;
-        let entry = tree.get_path(source_path).context("failed to get path")?;
+    pub fn extract(&self, repo: &'_ Repository, rev: Oid, upstream_path: &Path, local_path: &Path) -> Result<()> {
+        let tree = repo.find_tree(rev).context("failed to find tree at revision")?;
+        let entry = tree.get_path(upstream_path).context("failed to get path")?;
         let object = entry.to_object(&repo).context("failed to get path's object")?;
 
         if let Ok(blob) = object.peel_to_blob() {
-            let path = dest.join(entry.name().ok_or_else(|| anyhow!("name is not utf-8 encoded"))?);
+            let path = local_path.join(entry.name().ok_or_else(|| anyhow!("name is not utf-8 encoded"))?);
             fs::write(path, blob.content())?;
         } else {
             let tree = object.peel_to_tree()?;
@@ -77,7 +76,7 @@ impl App {
             tree.walk(TreeWalkMode::PreOrder, |dir, entry| {
                 let inner = || -> Result<()> {
                     let object = entry.to_object(&repo)?;
-                    let mut path = dest.join(dir);
+                    let mut path = local_path.join(dir);
                     path.push(entry.name().ok_or_else(|| anyhow!("name is not utf-8 encoded"))?);
 
                     if let Ok(blob) = object.peel_to_blob() {
@@ -102,26 +101,26 @@ impl App {
         Ok(())
     }
 
-    pub fn canonicalize(&self, repo: &Repository, dest: &Path) -> Result<PathBuf> {
+    pub fn canonicalize(&self, repo: &Repository, local_path: &Path) -> Result<PathBuf> {
         let workdir = repo.workdir().ok_or_else(|| anyhow!("repository is bare and has no workdir"))?
             .canonicalize().context("failed to find full path to repository workdir")?;
-        let dest = dest.canonicalize().context("failed to find full path to destination directory")?;
-        let relative = dest.strip_prefix(&workdir).context("destination directory not in a repository")?;
+        let local_path = local_path.canonicalize().context("failed to find full path to destination directory")?;
+        let relative = local_path.strip_prefix(&workdir).context("destination directory not in a repository")?;
 
         Ok(relative.to_path_buf())
     }
 
-    pub fn register(&self, url: &str, rev: &str, source_path: &Path, dest: &Path) -> Result<()> {
+    pub fn register(&self, url: &str, rev: Oid, upstream_path: &Path, local_path: &Path) -> Result<()> {
         let repo = Repository::open_from_env()?;
-        let relative = self.canonicalize(&repo, dest)?;
+        let relative = self.canonicalize(&repo, local_path)?;
         let workdir = repo.workdir().expect("canonicalize has already checked this");
 
         let relative_str = path_to_string(&relative)?;
 
         let mut config = Config::open(&workdir.join(".gitcopies")).context("failed to open .gitcopies")?;
         config.set_str(&format!("subcopy.{}.url", relative_str), url)?;
-        config.set_str(&format!("subcopy.{}.rev", relative_str), rev)?;
-        config.set_str(&format!("subcopy.{}.sourcePath", relative_str), path_to_string(source_path)?)?;
+        config.set_str(&format!("subcopy.{}.rev", relative_str), &rev.to_string())?;
+        config.set_str(&format!("subcopy.{}.upstreamPath", relative_str), path_to_string(upstream_path)?)?;
         Ok(())
     }
 
@@ -133,14 +132,14 @@ impl App {
 
         let mut map: HashMap<String, SubcopyConfigOption> = HashMap::new();
 
-        for entry in &snapshot.entries(Some(r"^subcopy\..*\.(url|rev|sourcePath)$")).context("failed to iter config entries")? {
+        for entry in &snapshot.entries(Some(r"^subcopy\..*\.(url|rev|upstreamPath)$")).context("failed to iter config entries")? {
             let entry = entry.context("failed to read config entry")?;
             let name = entry.name().ok_or_else(|| anyhow!("entry name was not valid utf-8"))?;
 
             let withoutend = name.rsplitn(2, '.').nth(1).ok_or_else(|| anyhow!("incomplete subcopy property name"))?;
             let middle = withoutend.splitn(2, '.').nth(1).ok_or_else(|| anyhow!("incomplete subcopy property name"))?;
             let slot = map.entry(middle.to_owned()).or_insert_with(|| SubcopyConfigOption {
-                dest_path: PathBuf::from(&middle),
+                local_path: PathBuf::from(&middle),
                 ..SubcopyConfigOption::default()
             });
 
@@ -148,8 +147,8 @@ impl App {
                 slot.url = entry.value().map(String::from);
             } else if name.ends_with("rev") {
                 slot.rev = entry.value().map(String::from);
-            } else if name.ends_with("sourcePath") {
-                slot.source_path = entry.value().map(PathBuf::from);
+            } else if name.ends_with("upstreamPath") {
+                slot.upstream_path = entry.value().map(PathBuf::from);
             }
         }
 
@@ -169,42 +168,37 @@ impl App {
         Ok(SubcopyConfig {
             url: snapshot.get_string(&format!("subcopy.{}.url", key))?,
             rev: snapshot.get_string(&format!("subcopy.{}.rev", key))?,
-            source_path: snapshot.get_path(&format!("subcopy.{}.sourcePath", key))?,
+            upstream_path: snapshot.get_path(&format!("subcopy.{}.upstreamPath", key))?,
         })
     }
 
-    pub fn with_repo<F>(&self, url: &str, rev: &str, source_path: &Path, dest: &Path, callback: F) -> Result<()>
+    pub fn with_repo<F, T>(&self, url: &str, rev: &str, upstream_path: &Path, local_path: &Path, callback: F) -> Result<T>
     where
-        F: FnOnce(&Repository) -> Result<()>,
+        F: FnOnce(&Repository) -> Result<T>,
     {
         let tmp = Builder::new().prefix("git-subcopy").tempdir().context("failed to get temporary directory")?;
-        let tmp_repo = Repository::init(tmp.path()).context("failed to init temp repository")?;
-        let init_repo = self.fetch(url).context("failed to fetch source repository")?;
-        self.extract(&init_repo, rev, source_path, tmp.path()).context("failed to extract files from source repository")?;
+        let upstream_repo = {
+            let upstream_bare = self.fetch(url).context("failed to fetch source repository")?;
+            let upstream_bare_path = upstream_bare.path().canonicalize().context("failed to get full cache path")?;
+            let upstream_str = format!("file://{}", path_to_string(&upstream_bare_path)?);
 
-        let oid = {
-            let mut index = tmp_repo.index().context("failed to read index of temp repo")?;
-            index.add_all(iter::once("."), IndexAddOption::DEFAULT, None).context("failed to add to index")?;
-            index.write_tree().context("failed to write index to tree")?
+            Repository::clone(&upstream_str, tmp.path())
+                .context("failed to clone cache of upstream repository")?
         };
-        let tree = tmp_repo.find_tree(oid).context("failed to find written tree")?;
-        let signature = Signature::now("git-subcopy", "there's nobody to blame this time").context("couldn't create signature")?;
-        tmp_repo.commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            &format!("Init upstream data at rev '{}'", rev),
-            &tree,
-            &[],
-        ).context("failed to create commit")?;
-        tmp_repo.reset_default(None, iter::once(".")).context("failed to reset index")?;
 
-        for entry in WalkDir::new(dest) {
+        upstream_repo.remote("upstream", url).context("failed to add upstream remote")?;
+
+        let rev = upstream_repo.revparse_single(rev).context("failed to parse revision")?;
+        upstream_repo.reset(&rev, ResetType::Hard, None).context("failed to reset repository")?;
+
+        let upstream_path = tmp.path().join(upstream_path);
+
+        for entry in WalkDir::new(local_path) {
             let entry = entry.context("failed to read directory entry")?;
 
             let from = entry.path();
-            let to_relative = entry.path().strip_prefix(dest).context("walkdir should always have prefix")?;
-            let to = tmp.path().join(to_relative);
+            let to_relative = entry.path().strip_prefix(local_path).context("walkdir should always have prefix")?;
+            let to = upstream_path.join(to_relative);
 
             if entry.file_type().is_dir() {
                 fs::create_dir_all(&to).context("failed to copy dir")?;
@@ -214,14 +208,14 @@ impl App {
             }
         }
 
-        callback(&tmp_repo)?;
+        let ret = callback(&upstream_repo)?;
 
-        for entry in WalkDir::new(tmp.path()).into_iter().filter_entry(|e| e.file_name().to_str() != Some(".git")) {
+        for entry in WalkDir::new(&upstream_path).into_iter().filter_entry(|e| e.file_name().to_str() != Some(".git")) {
             let entry = entry.context("failed to read directory entry")?;
 
             let from = entry.path();
-            let to_relative = entry.path().strip_prefix(tmp.path()).context("walkdir should always have prefix")?;
-            let to = dest.join(to_relative);
+            let to_relative = entry.path().strip_prefix(&upstream_path).context("walkdir should always have prefix")?;
+            let to = local_path.join(to_relative);
 
             if entry.file_type().is_dir() {
                 fs::create_dir_all(&to).context("failed to copy dir")?;
@@ -230,6 +224,7 @@ impl App {
                 fs::copy(from, &to).context("failed to copy file")?;
             }
         }
-        Ok(())
+
+        Ok(ret)
     }
 }
