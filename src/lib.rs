@@ -10,7 +10,7 @@ use git2::{
     TreeWalkMode,
     TreeWalkResult,
 };
-use log::debug;
+use log::{debug, info};
 use tempfile::Builder;
 use walkdir::WalkDir;
 
@@ -49,11 +49,13 @@ impl App {
         let path = self.cache_dir.join(base64::encode_config(url, base64::URL_SAFE_NO_PAD));
 
         if path.exists() {
+            info!("Fetching upstream in existing repository...");
             let repo = Repository::open_bare(&path).context("failed to open cached bare repository")?;
             repo.remote_anonymous(url).context("failed to create anonymous remote")?
                 .fetch(&[], None, None).context("failed to fetch from anonymous remote")?;
             Ok(repo)
         } else {
+            info!("Cloning new repository...");
             Ok(RepoBuilder::new()
                .bare(true)
                .clone(url, &path)
@@ -62,13 +64,15 @@ impl App {
     }
 
     pub fn extract(&self, repo: &'_ Repository, rev: Oid, upstream_path: &Path, local_path: &Path) -> Result<()> {
-        let tree = repo.find_tree(rev).context("failed to find tree at revision")?;
+        info!("Extracting files...");
+
+        let tree = repo.find_object(rev, None).context("failed to find object at revision")?
+            .peel_to_tree().context("failed to turn object into a tree")?;
         let entry = tree.get_path(upstream_path).context("failed to get path")?;
         let object = entry.to_object(&repo).context("failed to get path's object")?;
 
         if let Ok(blob) = object.peel_to_blob() {
-            let path = local_path.join(entry.name().ok_or_else(|| anyhow!("name is not utf-8 encoded"))?);
-            fs::write(path, blob.content())?;
+            fs::write(local_path, blob.content()).context("failed to write file")?;
         } else {
             let tree = object.peel_to_tree()?;
 
@@ -80,7 +84,7 @@ impl App {
                     path.push(entry.name().ok_or_else(|| anyhow!("name is not utf-8 encoded"))?);
 
                     if let Ok(blob) = object.peel_to_blob() {
-                        fs::write(path, blob.content())?;
+                        fs::write(path, blob.content()).context("failed to write file")?;
                     } else if object.peel_to_tree().is_ok() {
                         fs::create_dir_all(path)?;
                     }
@@ -132,7 +136,7 @@ impl App {
 
         let mut map: HashMap<String, SubcopyConfigOption> = HashMap::new();
 
-        for entry in &snapshot.entries(Some(r"^subcopy\..*\.(url|rev|upstreamPath)$")).context("failed to iter config entries")? {
+        for entry in &snapshot.entries(Some(r"^subcopy\..*\.(url|rev|upstreampath)$")).context("failed to iter config entries")? {
             let entry = entry.context("failed to read config entry")?;
             let name = entry.name().ok_or_else(|| anyhow!("entry name was not valid utf-8"))?;
 
@@ -147,7 +151,7 @@ impl App {
                 slot.url = entry.value().map(String::from);
             } else if name.ends_with("rev") {
                 slot.rev = entry.value().map(String::from);
-            } else if name.ends_with("upstreamPath") {
+            } else if name.ends_with("upstreampath") {
                 slot.upstream_path = entry.value().map(PathBuf::from);
             }
         }
@@ -180,48 +184,62 @@ impl App {
         let upstream_repo = {
             let upstream_bare = self.fetch(url).context("failed to fetch source repository")?;
             let upstream_bare_path = upstream_bare.path().canonicalize().context("failed to get full cache path")?;
-            let upstream_str = format!("file://{}", path_to_string(&upstream_bare_path)?);
+            let upstream_str = path_to_string(&upstream_bare_path)?;
 
+            info!("Cloning cached repo...");
             Repository::clone(&upstream_str, tmp.path())
                 .context("failed to clone cache of upstream repository")?
         };
 
-        upstream_repo.remote("upstream", url).context("failed to add upstream remote")?;
+        info!("Fetching upstream in clond repo...");
+        upstream_repo.remote("upstream", url).context("failed to add upstream remote")?
+            .fetch(&[], None, None)?;
 
         let rev = upstream_repo.revparse_single(rev).context("failed to parse revision")?;
         upstream_repo.reset(&rev, ResetType::Hard, None).context("failed to reset repository")?;
 
+        info!("Copying changes...");
         let upstream_path = tmp.path().join(upstream_path);
 
-        for entry in WalkDir::new(local_path) {
-            let entry = entry.context("failed to read directory entry")?;
+        if local_path.is_file() {
+            debug!("{} -> {}", local_path.display(), upstream_path.display());
+            fs::copy(local_path, &upstream_path).context("failed to copy file")?;
+        } else {
+            for entry in WalkDir::new(local_path) {
+                let entry = entry.context("failed to read directory entry")?;
 
-            let from = entry.path();
-            let to_relative = entry.path().strip_prefix(local_path).context("walkdir should always have prefix")?;
-            let to = upstream_path.join(to_relative);
+                let from = entry.path();
+                let to_relative = entry.path().strip_prefix(local_path).context("walkdir should always have prefix")?;
+                let to = upstream_path.join(to_relative);
 
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&to).context("failed to copy dir")?;
-            } else {
                 debug!("{} -> {}", from.display(), to.display());
-                fs::copy(from, &to).context("failed to copy file")?;
+                if entry.file_type().is_dir() {
+                    fs::create_dir_all(&to).context("failed to copy dir")?;
+                } else {
+                    fs::copy(from, &to).context("failed to copy file")?;
+                }
             }
         }
 
         let ret = callback(&upstream_repo)?;
 
-        for entry in WalkDir::new(&upstream_path).into_iter().filter_entry(|e| e.file_name().to_str() != Some(".git")) {
-            let entry = entry.context("failed to read directory entry")?;
+        if upstream_path.is_file() {
+            debug!("{} -> {}", upstream_path.display(), upstream_path.display());
+            fs::copy(&upstream_path, local_path).context("failed to copy file")?;
+        } else {
+            for entry in WalkDir::new(&upstream_path).into_iter().filter_entry(|e| e.file_name().to_str() != Some(".git")) {
+                let entry = entry.context("failed to read directory entry")?;
 
-            let from = entry.path();
-            let to_relative = entry.path().strip_prefix(&upstream_path).context("walkdir should always have prefix")?;
-            let to = local_path.join(to_relative);
+                let from = entry.path();
+                let to_relative = entry.path().strip_prefix(&upstream_path).context("walkdir should always have prefix")?;
+                let to = local_path.join(to_relative);
 
-            if entry.file_type().is_dir() {
-                fs::create_dir_all(&to).context("failed to copy dir")?;
-            } else {
                 debug!("{} -> {}", from.display(), to.display());
-                fs::copy(from, &to).context("failed to copy file")?;
+                if entry.file_type().is_dir() {
+                    fs::create_dir_all(&to).context("failed to copy dir")?;
+                } else {
+                    fs::copy(from, &to).context("failed to copy file")?;
+                }
             }
         }
 

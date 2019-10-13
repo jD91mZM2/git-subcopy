@@ -1,15 +1,15 @@
 use std::{
     env,
     ffi::OsString,
-    fs,
     iter,
     path::{PathBuf, Path},
     process::Command,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use git2::{IndexAddOption, RebaseOptions, Signature};
 use git_subcopy::App;
+use log::info;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -76,11 +76,7 @@ fn main() -> Result<()> {
         | Opt::Add { opts } => {
             let repo = app.fetch(&opts.url).context("failed to fetch git repo")?;
 
-            if opts.force {
-                fs::create_dir_all(&opts.local_path).context("failed to create destination directory")?;
-            } else {
-                fs::create_dir(&opts.local_path).context("failed to create *unique* destination directory")?;
-            }
+            ensure!(!opts.local_path.exists() || opts.force, "this could overwrite files, use --force if you're sure");
 
             let rev = repo.revparse_single(&opts.rev).context("failed to parse revision")?.id();
             app.extract(&repo, rev, &opts.upstream_path, &opts.local_path).context("failed to extract files")?;
@@ -138,6 +134,7 @@ fn main() -> Result<()> {
 
                 let commit = repo.find_annotated_commit(id).context("failed to find new commit")?;
 
+                info!("Rebasing...");
                 repo.rebase(Some(&commit), None, Some(&onto_commit), Some(
                     RebaseOptions::new()
                         .quiet(false)
