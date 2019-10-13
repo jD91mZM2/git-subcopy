@@ -1,0 +1,8 @@
+[subcopy "test-subcopies/xidlehook-src"]
+	url = https://gitlab.com/jD91mZM2/xidlehook
+	rev = e508fd8441ad8336fbbcc0870f8ed06d0f465c2e
+	upstreamPath = src
+[subcopy "test-subcopies/all-packages.nix"]
+	url = https://github.com/NixOS/nixpkgs
+	rev = ee2c8ece9e3960669775d7947ae11f1d33829578
+	upstreamPath = pkgs/top-level/all-packages.nix
