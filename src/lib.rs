@@ -45,14 +45,17 @@ impl App {
         })
     }
 
-    pub fn fetch(&self, url: &str) -> Result<Repository> {
+    pub fn fetch(&self, url: &str, update_existing: bool) -> Result<Repository> {
         let path = self.cache_dir.join(base64::encode_config(url, base64::URL_SAFE_NO_PAD));
 
         if path.exists() {
-            info!("Fetching upstream in existing repository...");
             let repo = Repository::open_bare(&path).context("failed to open cached bare repository")?;
-            repo.remote_anonymous(url).context("failed to create anonymous remote")?
-                .fetch(&[], None, None).context("failed to fetch from anonymous remote")?;
+
+            if update_existing {
+                info!("Fetching upstream in existing repository...");
+                repo.remote_anonymous(url).context("failed to create anonymous remote")?
+                    .fetch(&[], None, None).context("failed to fetch from anonymous remote")?;
+            }
             Ok(repo)
         } else {
             info!("Cloning new repository...");
@@ -76,6 +79,7 @@ impl App {
         } else {
             let tree = object.peel_to_tree()?;
 
+            fs::create_dir_all(local_path)?;
             let mut error = None;
             tree.walk(TreeWalkMode::PreOrder, |dir, entry| {
                 let inner = || -> Result<()> {
@@ -182,7 +186,7 @@ impl App {
     {
         let tmp = Builder::new().prefix("git-subcopy").tempdir().context("failed to get temporary directory")?;
         let upstream_repo = {
-            let upstream_bare = self.fetch(url).context("failed to fetch source repository")?;
+            let upstream_bare = self.fetch(url, false).context("failed to fetch source repository")?;
             let upstream_bare_path = upstream_bare.path().canonicalize().context("failed to get full cache path")?;
             let upstream_str = path_to_string(&upstream_bare_path)?;
 
@@ -191,9 +195,7 @@ impl App {
                 .context("failed to clone cache of upstream repository")?
         };
 
-        info!("Fetching upstream in clond repo...");
-        upstream_repo.remote("upstream", url).context("failed to add upstream remote")?
-            .fetch(&[], None, None)?;
+        upstream_repo.remote("upstream", url).context("failed to add upstream remote")?;
 
         let rev = upstream_repo.revparse_single(rev).context("failed to parse revision")?;
         upstream_repo.reset(&rev, ResetType::Hard, None).context("failed to reset repository")?;

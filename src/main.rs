@@ -66,7 +66,10 @@ enum Opt {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::init_from_env(
+        env_logger::Env::new()
+            .default_filter_or("git_subcopy=info")
+    );
 
     let opt = Opt::from_args();
     let app = App::new()?;
@@ -74,7 +77,7 @@ fn main() -> Result<()> {
     match &opt {
         Opt::Fetch { opts }
         | Opt::Add { opts } => {
-            let repo = app.fetch(&opts.url).context("failed to fetch git repo")?;
+            let repo = app.fetch(&opts.url, true).context("failed to fetch git repo")?;
 
             ensure!(!opts.local_path.exists() || opts.force, "this could overwrite files, use --force if you're sure");
 
@@ -118,6 +121,9 @@ fn main() -> Result<()> {
             let rev = app.with_repo(&conf.url, &conf.rev, &conf.upstream_path, local_path, |repo| {
                 let onto_rev = repo.revparse_single(&rev).context("failed to parse specified upstream revision")?;
                 let onto_commit = repo.find_annotated_commit(onto_rev.id()).context("failed to find commit for revision")?;
+
+                repo.find_remote("upstream").expect("remote 'upstream' should be set at this point")
+                    .fetch(&[], None, None)?;
 
                 let head = repo.head().context("failed to find head")?
                     .peel_to_commit().context("head wasn't a commit")?;
