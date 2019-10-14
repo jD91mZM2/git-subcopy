@@ -1,7 +1,7 @@
 # git-subcopy
 
 A way to include single files or directories from large git
-repositories. Think of it as a crappy clone of `git subtree**, but with
+repositories. Think of it as a crappy clone of `git subtree`, but with
 the ability to hand-pick out what you want.
 
 ## Why?
@@ -44,7 +44,7 @@ minutes after the initial version was completed:
 
 ## Installation
 
-Make sure you have rust, a C compiler, and openssh installed. Then
+Make sure you have rust, a C compiler, and openssl installed. Then
 just invoke the following:
 
 ```
