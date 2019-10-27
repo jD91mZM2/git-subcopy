@@ -1,8 +1,13 @@
 [package]
 name = "git-subcopy"
+description = "Link files across git repositories"
 version = "0.1.0"
 authors = ["jD91mZM2 <me@krake.one>"]
 edition = "2018"
+repository = "https://gitlab.com/jD91mZM2/git-subcopy"
+keywords = ["git"]
+categories = ["command-line-utilities", "development-tools"]
+license = "MIT"
 
 [dependencies]
 git2 = "0.10.1"
