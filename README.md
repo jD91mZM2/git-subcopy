@@ -4,7 +4,7 @@ A way to include single files or directories from large git
 repositories. Think of it as a crappy clone of `git subtree`, but with
 the ability to hand-pick out what you want.
 
-## Why?
+## Why this exists
 
 Pick your poison:
 
@@ -25,7 +25,7 @@ Pick your poison:
 - **I don't have an opinion on monorepos** => Still, this tool is
   pretty cool and you should try it just because :)
 
-## State?
+## State of the project
 
 This is definitely not stable, both the library interface and the CLI
 interface are both a little hairy. In general, consider this either an
@@ -44,9 +44,18 @@ minutes after the initial version was completed:
 
 ## Installation
 
-Make sure you have rust, a C compiler, and openssl installed. Then
-just invoke the following:
+I recommend installing this project (or any project!) using the Nix
+package manager. It will automatically fetch all native dependencies
+for you so you only need to run the following.
+
+```sh
+nix-env -if https://gitlab.com/jD91mZM2/git-subcopy/-/archive/master.tar.gz
+```
+
+Alternatively, you can manually make sure you have rust, a C compiler,
+and openssl installed and then use the cargo package manager to fetch
+this project.
 
 ```
-cargo install --git https://gitlab.com/jD91mZM2/git-subcopy
+cargo install git-subcopy
 ```
