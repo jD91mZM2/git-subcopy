@@ -10,7 +10,7 @@ categories = ["command-line-utilities", "development-tools"]
 license = "MIT"
 
 [dependencies]
-git2 = "0.10.1"
+git2 = "0.16.1"
 base64 = "0.10.1"
 dirs = "2.0.2"
 structopt = "0.3.3"
